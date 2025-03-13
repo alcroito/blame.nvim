@@ -16,6 +16,8 @@ local mappings = require("blame.mappings")
 ---@field file_path string
 ---@field cwd string
 ---@field commit_stack Porcelain[]
+---@field cursor_stack table[]
+---@field first_cursor table|nil
 local BlameStack = {}
 
 ---@return BlameStack
@@ -43,6 +45,8 @@ function BlameStack:new(config, blame_view, file_path, cwd)
     end)
 
     o.commit_stack = {}
+    o.cursor_stack = {}
+    o.first_cursor = nil
 
     return o
 end
@@ -55,7 +59,7 @@ function BlameStack:push(commit)
         return
     end
 
-    self:get_show_file_content(commit, true, function(file_content)
+    self:get_show_file_content(commit, true, function(file_content, line)
         self:get_blame_for_commit(commit, true, function(blame_lines)
             if self.stack_buffer == nil then
                 self:create_blame_buf()
@@ -72,9 +76,16 @@ function BlameStack:push(commit)
                 file_content
             )
             table.insert(self.commit_stack, commit)
+            table.insert(self.cursor_stack, vim.api.nvim_win_get_cursor(self.blame_window))
+            if #self.cursor_stack == 1 then
+                self.first_cursor = self.cursor_stack[1]
+            end
             self:open_stack_info_float()
 
             self.blame_view:open(blame_lines)
+            if line ~= nil then
+                vim.api.nvim_win_set_cursor(self.blame_window, { line, 0 })
+            end
         end)
     end, function()
         vim.notify(
@@ -93,11 +104,12 @@ function BlameStack:pop()
         return
     end
     table.remove(self.commit_stack, nil)
+    local cursor = table.remove(self.cursor_stack, nil)
     self:open_stack_info_float()
     self:get_show_file_content(
         self.commit_stack[#self.commit_stack],
         true,
-        function(file_content)
+        function(file_content, line)
             vim.api.nvim_buf_set_lines(
                 self.stack_buffer,
                 0,
@@ -112,6 +124,7 @@ function BlameStack:pop()
                 function(blame_lines)
                     vim.schedule(function()
                         self.blame_view:open(blame_lines)
+                        vim.api.nvim_win_set_cursor(self.blame_window, cursor)
                     end)
                 end
             )
@@ -162,6 +175,7 @@ end
 
 function BlameStack:reset_to_original_buf()
     self.commit_stack = {}
+    self.cursor_stack = {}
     vim.api.nvim_set_current_win(self.original_window)
     vim.api.nvim_set_current_buf(self.original_buffer)
     if self.stack_buffer and vim.api.nvim_buf_is_valid(self.stack_buffer) then
@@ -171,6 +185,9 @@ function BlameStack:reset_to_original_buf()
     self:get_blame_for_commit({}, false, function(blame_lines)
         vim.schedule(function()
             self.blame_view:open(blame_lines)
+            if self.first_cursor ~= nil then
+                vim.api.nvim_win_set_cursor(self.blame_window, self.first_cursor)
+            end
         end)
     end)
     self.stack_buffer = nil
@@ -323,30 +340,75 @@ function BlameStack:get_blame_for_commit(commit, prev, cb, err_cb)
     end)
 end
 
+local function parse_hunks(diff)
+    local hunks = {}
+    for _, line in ipairs(diff) do
+        local a_line, i = line:match("^@@ %-(%d+)()")
+        if a_line ~= nil then
+            line = line:sub(i)
+            local a_lines, i = line:match("^,(%d+)()")
+            if a_lines ~= nil then
+                a_lines = tonumber(a_lines)
+                line = line:sub(i)
+            end
+            local b_line, i = line:match("^ %+(%d+)()")
+            line = line:sub(i)
+            local b_lines = line:match("^,(%d+)")
+            if b_lines ~= nil then
+                b_lines = tonumber(b_lines)
+            end
+            table.insert(hunks, { a_line = tonumber(a_line), a_lines = a_lines or 1, b_line = tonumber(b_line), b_lines = b_lines or 1 })
+        end
+    end
+    return hunks
+end
+
 ---@param commit Porcelain
 ---@param prev boolean should show previous commit
----@param cb fun(any) callback on show command end
+---@param cb fun(any, number|nil) callback on show command end
 ---@param err_cb nil | fun(err) callback on error show command
 function BlameStack:get_show_file_content(commit, prev, cb, err_cb)
     local hash, filepath = self:get_hash_and_filepath(commit, prev)
-    self.git_client:show(filepath, self.git_root, hash, function(file_content)
-        vim.schedule(function()
-            -- most of the time empty line is inserted from git-show. Might create issues but for now this crude check works
-            if file_content[#file_content] == "" then
-                table.remove(file_content)
-            end
+    local function _show(line)
+        self.git_client:show(filepath, self.git_root, hash, function(file_content)
+            vim.schedule(function()
+                -- most of the time empty line is inserted from git-show. Might create issues but for now this crude check works
+                if file_content[#file_content] == "" then
+                    table.remove(file_content)
+                end
 
-            if cb ~= nil then
-                cb(file_content)
+                if cb ~= nil then
+                    cb(file_content, line)
+                end
+            end)
+        end, function(err)
+            if err_cb then
+                err_cb(err)
+            else
+                vim.notify(err, vim.log.levels.INFO)
             end
         end)
-    end, function(err)
-        if err_cb then
-            err_cb(err)
-        else
-            vim.notify(err, vim.log.levels.INFO)
-        end
-    end)
+    end
+    if prev then
+        self.git_client:diff(filepath, self.git_root, hash, commit.hash, function(diff)
+            local line
+            for _, hunk in ipairs(parse_hunks(diff)) do
+                if hunk.b_line <= commit.original_line and commit.original_line < hunk.b_line + hunk.b_lines then
+                    line = hunk.a_line
+                    break
+                end
+            end
+            _show(line)
+        end, function(err)
+            if err_cb then
+                err_cb(err)
+            else
+                vim.notify(err, vim.log.levels.INFO)
+            end
+        end)
+    else
+        _show(nil)
+    end
 end
 
 return BlameStack

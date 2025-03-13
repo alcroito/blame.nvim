@@ -87,4 +87,9 @@ function Git:show(file_path, cwd, commit, callback, err_cb)
     end
 end
 
+function Git:diff(file_path, cwd, a_commit, b_commit, callback, err_cb)
+    local diff_command = { "git", "--no-pager", "diff", "--unified=0", a_commit, b_commit, "--", file_path }
+    execute_command(diff_command, cwd, callback, err_cb)
+end
+
 return Git

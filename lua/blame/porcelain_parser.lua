@@ -14,6 +14,7 @@ local M = {}
 ---@field previous string|nil
 ---@field summary string
 ---@field content string
+---@field original_line number
 
 ---Parses raw porcelain data (string[]) into an array of tables for each line containing the commit data
 ---@param blame_porcelain string[]
@@ -25,7 +26,7 @@ M.parse_porcelain = function(blame_porcelain)
         if not ident then
             all_lines[#all_lines].content = entry
         elseif #ident == 40 then
-            table.insert(all_lines, { hash = ident })
+            table.insert(all_lines, { hash = ident, original_line = tonumber(entry:match("^%S+ (%d+)")) })
         else
             ident = ident:gsub("-", "_")
 
